@@ -1,8 +1,16 @@
 defmodule CacheTest do
   use ExUnit.Case
-  doctest Cache
 
   @default_ttl 1_000
+
+  describe "doc tests" do
+    setup do
+      start_supervised(Cache.Supervisor)
+      :ok
+    end
+
+    doctest Cache
+  end
 
   describe "start_link/1" do
     test "starts a GenServer with default options" do

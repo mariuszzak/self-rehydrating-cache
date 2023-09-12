@@ -10,6 +10,21 @@ defmodule Cache do
   Cache module provides the following functions:
     - `register_function/4`: registers a function that will be computed periodically to update the cache
     - `get/3`: gets the value associated with `key`
+
+  ## Examples
+
+  ```
+  iex> ttl = 1_000
+  iex> refresh_interval = 100
+  iex> function = fn -> {:ok, :cached_value} end
+  iex> key = :cached_key
+  iex> Cache.register_function(function, key, ttl, refresh_interval)
+  :ok
+  iex> Process.sleep(refresh_interval)
+  iex> Cache.get(key)
+  {:ok, :cached_value}
+  ```
+
   """
   use GenServer
 
