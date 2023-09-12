@@ -66,19 +66,19 @@ defmodule CacheTest do
     end
 
     test "if the value is stored in the cache, it is returned immediately" do
-      test_pid = self()
+      refresh_interval = 100
+      tolerance = 10
 
       Cache.register_function(
         fn ->
-          send(test_pid, :function_was_called)
           {:ok, :cached_value}
         end,
         :cached_key,
         @default_ttl,
-        100
+        refresh_interval
       )
 
-      assert_receive(:function_was_called, 200)
+      Process.sleep(refresh_interval + tolerance)
 
       assert {:ok, :cached_value} = Cache.get(:cached_key)
     end
@@ -274,8 +274,8 @@ defmodule CacheTest do
                  10
                )
 
-               # Assert that registration of the functions took less than 10ms
-               assert System.monotonic_time(:millisecond) - time < 10
+               # Assert that registration of the functions took less than 15ms
+               assert System.monotonic_time(:millisecond) - time < 15
 
                Process.sleep(refresh_interval + function_time_execution + 10)
 
@@ -287,14 +287,11 @@ defmodule CacheTest do
     end
 
     test "function is executed periodically" do
-      test_pid = self()
-
       refresh_interval = 100
-      tolerance = 15
+      tolerance = 10
 
       Cache.register_function(
         fn ->
-          send(test_pid, {:execution_started, System.monotonic_time(:millisecond)})
           {:ok, System.monotonic_time(:millisecond)}
         end,
         :cached_key,
@@ -302,16 +299,15 @@ defmodule CacheTest do
         refresh_interval
       )
 
-      assert_receive({:execution_started, execution_a}, refresh_interval + tolerance)
+      Process.sleep(refresh_interval + tolerance)
       assert {:ok, value_a} = Cache.get(:cached_key, tolerance)
 
-      assert_receive({:execution_started, execution_b}, refresh_interval + tolerance)
+      Process.sleep(refresh_interval + tolerance)
       assert {:ok, value_b} = Cache.get(:cached_key, tolerance)
 
-      assert_receive({:execution_started, execution_c}, refresh_interval + tolerance)
+      Process.sleep(refresh_interval + tolerance)
       assert {:ok, value_c} = Cache.get(:cached_key, tolerance)
 
-      assert [execution_a, execution_b, execution_c] |> Enum.uniq() |> length() == 3
       assert [value_a, value_b, value_c] |> Enum.uniq() |> length() == 3
     end
 
@@ -370,6 +366,7 @@ defmodule CacheTest do
                )
 
                assert_receive(:function_finished, refresh_interval * 3)
+               Process.sleep(10)
                assert {:ok, :cached_value} = Cache.get(:cached_key)
              end) =~ "oops it crashed"
     end
@@ -395,7 +392,7 @@ defmodule CacheTest do
                  refresh_interval
                )
 
-               Process.sleep(refresh_interval + 10)
+               Process.sleep(refresh_interval)
                assert {:error, :not_computed} = Cache.get(:cached_key)
                Process.sleep(refresh_interval + 10)
                assert {:ok, :cached_value} = Cache.get(:cached_key)

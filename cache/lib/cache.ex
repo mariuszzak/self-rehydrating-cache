@@ -4,7 +4,7 @@ defmodule Cache do
   that will recompute periodically and store their results in the cache for fast-access instead of being
   called every time the values are needed.
 
-  The Cache server needs to be started together with Cache.Store and Cache.TaskSupervisor.
+  The Cache server needs to be started together with Cache.Store, Cache.TaskSupervisor and Cache.WorkersSupervisor.
   You can start everything together using `Cache.Supervisor.start_link/1`
 
   Cache module provides the following functions:
@@ -20,7 +20,7 @@ defmodule Cache do
   iex> key = :cached_key
   iex> Cache.register_function(function, key, ttl, refresh_interval)
   :ok
-  iex> Process.sleep(refresh_interval)
+  iex> Process.sleep(refresh_interval + 10)
   iex> Cache.get(key)
   {:ok, :cached_value}
   ```
@@ -30,7 +30,7 @@ defmodule Cache do
 
   alias Cache.Store
   alias Cache.State
-  alias Cache.RegisteredFunction
+  alias Cache.Worker
 
   require Logger
 
@@ -46,7 +46,9 @@ defmodule Cache do
     initial_state = %State{
       registered_functions: %{},
       store: opts[:store] || Store,
-      task_supervisor: opts[:task_supervisor] || Cache.TaskSupervisor
+      task_supervisor: opts[:task_supervisor] || Cache.TaskSupervisor,
+      workers_supervisor: opts[:workers_supervisor] || Cache.WorkersSupervisor,
+      subscribers: %{}
     }
 
     GenServer.start_link(__MODULE__, initial_state, name: opts[:name] || __MODULE__)
@@ -138,121 +140,21 @@ defmodule Cache do
         {:reply, {:error, :already_registered}, state}
 
       _ ->
-        state = %{
-          state
-          | registered_functions:
-              Map.put(state.registered_functions, key, %RegisteredFunction{
-                fun: fun,
-                ttl: ttl,
-                refresh_interval: refresh_interval,
-                processing: false,
-                task_processing_pid: nil,
-                subscribers: []
-              })
+        worker_args = %{
+          fun: fun,
+          key: key,
+          ttl: ttl,
+          refresh_interval: refresh_interval,
+          task_supervisor: state.task_supervisor,
+          manager_pid: self()
         }
 
-        {:reply, :ok, state, {:continue, {:schedule_refresh, key, refresh_interval}}}
+        {:ok, pid} =
+          DynamicSupervisor.start_child(state.workers_supervisor, {Worker, worker_args})
+
+        {:reply, :ok,
+         %{state | registered_functions: Map.put(state.registered_functions, key, pid)}}
     end
-  end
-
-  @impl true
-  def handle_info({:refresh, key}, state) do
-    %RegisteredFunction{processing: false} =
-      registered_function = Map.get(state.registered_functions, key)
-
-    %Task{pid: task_pid} = execute_function_async(state, key, registered_function)
-
-    registered_function = %RegisteredFunction{
-      registered_function
-      | processing: true,
-        task_processing_pid: task_pid
-    }
-
-    {:noreply, update_registered_function(state, key, registered_function)}
-  end
-
-  # Handles success messages from the TaskSupervisor
-  @impl true
-  def handle_info({_ref, {:function_processing_finished, key, value}}, state) do
-    registered_function = fetch_registered_function(state, key)
-
-    for subscriber <- registered_function.subscribers do
-      send(subscriber, {:function_processing_finished, key, value})
-    end
-
-    state =
-      update_registered_function(state, key, %RegisteredFunction{
-        registered_function
-        | processing: false,
-          subscribers: []
-      })
-
-    {:noreply, state, {:continue, {:schedule_refresh, key, registered_function.refresh_interval}}}
-  end
-
-  # Handles normal task finish from the TaskSupervisor
-  def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
-    {:noreply, state}
-  end
-
-  # Handles error messages from the TaskSupervisor
-  @impl true
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    {key, registered_function} = fetch_registered_function_by_pid(state, pid)
-
-    state =
-      update_registered_function(state, key, %RegisteredFunction{
-        registered_function
-        | processing: false,
-          subscribers: []
-      })
-
-    {:noreply, state, {:continue, {:schedule_refresh, key, registered_function.refresh_interval}}}
-  end
-
-  @impl true
-  def handle_continue({:schedule_refresh, key, refresh_interval}, state) do
-    Process.send_after(self(), {:refresh, key}, refresh_interval)
-    {:noreply, state}
-  end
-
-  # HELPERS
-
-  defp execute_function_async(state, key, registered_function) do
-    Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
-      case registered_function.fun.() do
-        {:ok, value} ->
-          :ok = Store.store(state.store, key, value, registered_function.ttl)
-          {:function_processing_finished, key, {:ok, value}}
-
-        {:error, error} ->
-          Logger.error("Function failed: #{inspect(error)}")
-          {:function_processing_finished, key, :error}
-      end
-    end)
-  end
-
-  defp fetch_registered_function(%State{registered_functions: registered_functions}, key) do
-    Map.get(registered_functions, key)
-  end
-
-  defp fetch_registered_function_by_pid(%State{registered_functions: registered_functions}, pid) do
-    # this is slow but search by pid only in case of crash in TaskSupervisor
-    # so it should rarely happen
-    Enum.find_value(registered_functions, fn {key, registered_function} ->
-      registered_function.task_processing_pid == pid && {key, registered_function}
-    end)
-  end
-
-  defp update_registered_function(
-         %State{} = state,
-         key,
-         %RegisteredFunction{} = registered_function
-       ) do
-    %State{
-      state
-      | registered_functions: Map.put(state.registered_functions, key, registered_function)
-    }
   end
 
   defp wait_for_function_execution(key, timeout) do
@@ -270,14 +172,14 @@ defmodule Cache do
   @impl true
   def handle_cast({:get, key, from}, state) do
     case state.registered_functions do
-      %{^key => registered_function} ->
+      %{^key => registered_function_pid} ->
         case Store.get(state.store, key) do
           {:ok, value} ->
             send(from, {:get_response, {:ok, value}})
             {:noreply, state}
 
           {:error, :not_found} ->
-            handle_value_not_found(registered_function, state, from, key)
+            handle_value_not_found(registered_function_pid, state, from, key)
 
           {:error, :expired} ->
             send(from, {:get_response, {:error, :expired}})
@@ -290,25 +192,40 @@ defmodule Cache do
     end
   end
 
-  defp handle_value_not_found(%RegisteredFunction{processing: true}, state, from, key) do
-    send(from, {:get_response, {:error, :processing_in_progress}})
-    {:noreply, subscribe_caller_to_registered_function(state, key, from)}
-  end
+  @impl true
+  def handle_info({:function_processing_finished, key, result, ttl}, state) do
+    with {:ok, value} <- result, do: :ok = Store.store(state.store, key, value, ttl)
 
-  defp handle_value_not_found(%RegisteredFunction{processing: false}, state, from, _key) do
-    send(from, {:get_response, {:error, :not_computed}})
+    state
+    |> Map.get(:subscribers)
+    |> Map.get(key, [])
+    |> Enum.each(fn subscriber ->
+      send(subscriber, {:function_processing_finished, key, result})
+    end)
+
     {:noreply, state}
   end
 
+  defp handle_value_not_found(registered_function_pid, state, from, key) do
+    case Worker.processing_in_progress?(registered_function_pid) do
+      true ->
+        send(from, {:get_response, {:error, :processing_in_progress}})
+        {:noreply, subscribe_caller_to_registered_function(state, key, from)}
+
+      false ->
+        send(from, {:get_response, {:error, :not_computed}})
+        {:noreply, state}
+    end
+  end
+
   defp subscribe_caller_to_registered_function(
-         %State{registered_functions: registered_functions} = state,
+         %State{subscribers: subscribers} = state,
          key,
          subscriber
        ) do
-    registered_function = registered_functions[key]
-    subscribers = [subscriber | registered_function.subscribers]
-    registered_function = %RegisteredFunction{registered_function | subscribers: subscribers}
-    registered_functions = Map.put(registered_functions, key, registered_function)
-    %State{state | registered_functions: registered_functions}
+    subscribers =
+      Map.update(subscribers, key, [subscriber], fn subscribers -> [subscriber | subscribers] end)
+
+    %State{state | subscribers: subscribers}
   end
 end

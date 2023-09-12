@@ -12,7 +12,11 @@ defmodule Cache.Supervisor do
     children = [
       {Cache.Store, name: Cache.Store},
       {Task.Supervisor, name: Cache.TaskSupervisor},
-      {Cache, store: Cache.Store, task_supervisor: Cache.TaskSupervisor}
+      {DynamicSupervisor, strategy: :one_for_one, name: Cache.WorkersSupervisor},
+      {Cache,
+       store: Cache.Store,
+       task_supervisor: Cache.TaskSupervisor,
+       workers_supervisor: Cache.WorkersSupervisor}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
