@@ -127,6 +127,47 @@ defmodule CacheTest do
       refute_received(:execution_started)
     end
 
+    test "multiple get calls at the same time does not block each other" do
+      test_pid = self()
+
+      execution_time = 100
+      refresh_interval = 200
+
+      Cache.register_function(
+        fn ->
+          send(test_pid, :execution_started)
+          Process.sleep(execution_time)
+          {:ok, :cached_value}
+        end,
+        :cached_key,
+        @default_ttl,
+        refresh_interval
+      )
+
+      assert_receive(:execution_started, refresh_interval + 10)
+
+      time = System.monotonic_time(:millisecond)
+
+      task_1 =
+        Task.async(fn ->
+          assert {:ok, :cached_value} = Cache.get(:cached_key, execution_time + 10)
+        end)
+
+      task_2 =
+        Task.async(fn ->
+          assert {:ok, :cached_value} = Cache.get(:cached_key, execution_time + 10)
+        end)
+
+      task_3 =
+        Task.async(fn ->
+          assert {:ok, :cached_value} = Cache.get(:cached_key, execution_time + 10)
+        end)
+
+      Task.await_many([task_1, task_2, task_3])
+
+      assert System.monotonic_time(:millisecond) - time <= execution_time + 10
+    end
+
     test "if the value for `key` is not stored in the cache" <>
            "and a computation of the function associated with this `key` is not in progress" <>
            "it returns the not_computed error immediately" do
@@ -241,6 +282,9 @@ defmodule CacheTest do
     test "function is executed periodically" do
       test_pid = self()
 
+      refresh_interval = 100
+      tolerance = 15
+
       Cache.register_function(
         fn ->
           send(test_pid, {:execution_started, System.monotonic_time(:millisecond)})
@@ -248,17 +292,17 @@ defmodule CacheTest do
         end,
         :cached_key,
         @default_ttl,
-        100
+        refresh_interval
       )
 
-      assert_receive({:execution_started, execution_a}, 110)
-      assert {:ok, value_a} = Cache.get(:cached_key, 10)
+      assert_receive({:execution_started, execution_a}, refresh_interval + tolerance)
+      assert {:ok, value_a} = Cache.get(:cached_key, tolerance)
 
-      assert_receive({:execution_started, execution_b}, 110)
-      assert {:ok, value_b} = Cache.get(:cached_key, 10)
+      assert_receive({:execution_started, execution_b}, refresh_interval + tolerance)
+      assert {:ok, value_b} = Cache.get(:cached_key, tolerance)
 
-      assert_receive({:execution_started, execution_c}, 110)
-      assert {:ok, value_c} = Cache.get(:cached_key, 10)
+      assert_receive({:execution_started, execution_c}, refresh_interval + tolerance)
+      assert {:ok, value_c} = Cache.get(:cached_key, tolerance)
 
       assert [execution_a, execution_b, execution_c] |> Enum.uniq() |> length() == 3
       assert [value_a, value_b, value_c] |> Enum.uniq() |> length() == 3

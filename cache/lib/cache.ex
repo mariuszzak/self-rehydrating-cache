@@ -22,8 +22,8 @@ defmodule Cache do
     @moduledoc false
 
     @type t :: %__MODULE__{
-            store: pid() | atom(),
-            task_supervisor: pid() | atom(),
+            store: Agent.server(),
+            task_supervisor: Supervisor.supervisor(),
             registered_functions: %{
               (key :: any) => RegisteredFunction.t()
             }
@@ -38,6 +38,7 @@ defmodule Cache do
           | {:error, :timeout}
           | {:error, :not_registered}
 
+  @spec start_link(Keyword.t()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     initial_state = %State{
       registered_functions: %{},
@@ -121,29 +122,18 @@ defmodule Cache do
       | registered_functions: Map.put(state.registered_functions, key, registered_function)
     }
 
-    pid = self()
-
     Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
       {:ok, value} = registered_function.fun.()
       :ok = Cache.Store.store(state.store, key, value, registered_function.ttl)
-      send(pid, {:function_processed, key, value})
+      {:function_processed, key, value}
     end)
 
     {:noreply, state}
   end
 
+  # Handles success messages from the TaskSupervisor
   @impl true
-  def handle_info({_ref, _answer}, state) do
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:function_processed, key, value}, state) do
+  def handle_info({_ref, {:function_processed, key, value}}, state) do
     registered_function = fetch_registered_function(state, key)
 
     for subscriber <- registered_function.subscribers do
@@ -159,6 +149,12 @@ defmodule Cache do
           subscribers: []
       })
 
+    {:noreply, state}
+  end
+
+  # Handles error messages from the TaskSupervisor
+  @impl true
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
     {:noreply, state}
   end
 
@@ -262,6 +258,7 @@ defmodule Cache.Store do
 
   use Agent
 
+  @spec start_link(Keyword.t()) :: Agent.on_start()
   def start_link(opts \\ []) do
     initial_state = %{}
     Agent.start_link(fn -> initial_state end, name: opts[:name] || __MODULE__)
@@ -293,6 +290,7 @@ end
 defmodule Cache.Supervisor do
   use Supervisor
 
+  @spec start_link(Keyword.t()) :: GenServer.server()
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
   end
