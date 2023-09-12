@@ -295,14 +295,15 @@ defmodule Cache do
     {:noreply, state}
   end
 
-  defp subscribe_caller_to_registered_function(state, key, subscriber) do
-    %State{
-      state
-      | registered_functions:
-          Map.put(state.registered_functions, key, %RegisteredFunction{
-            state.registered_functions[key]
-            | subscribers: [subscriber | state.registered_functions[key].subscribers]
-          })
-    }
+  defp subscribe_caller_to_registered_function(
+         %State{registered_functions: registered_functions} = state,
+         key,
+         subscriber
+       ) do
+    registered_function = registered_functions[key]
+    subscribers = [subscriber | registered_function.subscribers]
+    registered_function = %RegisteredFunction{registered_function | subscribers: subscribers}
+    registered_functions = Map.put(registered_functions, key, registered_function)
+    %State{state | registered_functions: registered_functions}
   end
 end

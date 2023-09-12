@@ -190,7 +190,7 @@ defmodule CacheTest do
         100
       )
 
-      Process.sleep(601)
+      Process.sleep(610)
       assert {:error, :expired} = Cache.get(:cached_key)
     end
 
