@@ -1,46 +1,22 @@
 defmodule Cache do
+  @moduledoc """
+  FOO
+
+  """
   use GenServer
 
   alias Cache.Store
+  alias Cache.State
   alias Cache.RegisteredFunction
 
   require Logger
-
-  defmodule State do
-    @moduledoc false
-
-    @type t :: %__MODULE__{
-            store: Agent.agent(),
-            task_supervisor: Supervisor.supervisor(),
-            registered_functions: %{
-              (key :: any) => RegisteredFunction.t()
-            }
-          }
-
-    @enforce_keys [:store, :task_supervisor, :registered_functions]
-    defstruct [:store, :task_supervisor, :registered_functions]
-  end
-
-  defmodule RegisteredFunction do
-    @moduledoc false
-
-    @type t :: %__MODULE__{
-            fun: (-> {:ok, any()} | {:error, any()}),
-            ttl: non_neg_integer(),
-            refresh_interval: non_neg_integer(),
-            processing: boolean(),
-            task_processing_pid: pid(),
-            subscribers: [pid()]
-          }
-
-    @enforce_keys [:fun, :ttl, :refresh_interval, :processing, :task_processing_pid, :subscribers]
-    defstruct [:fun, :ttl, :refresh_interval, :processing, :task_processing_pid, :subscribers]
-  end
 
   @type result ::
           {:ok, any()}
           | {:error, :timeout}
           | {:error, :not_registered}
+          | {:error, :expired}
+          | {:error, :not_computed}
 
   @spec start_link(Keyword.t()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -53,10 +29,7 @@ defmodule Cache do
     GenServer.start_link(__MODULE__, initial_state, name: opts[:name] || __MODULE__)
   end
 
-  @impl true
-  def init(initial_state) do
-    {:ok, initial_state}
-  end
+  # CLIENT
 
   @doc ~s"""
   Registers a function that will be computed periodically to update the cache.
@@ -88,6 +61,51 @@ defmodule Cache do
              is_integer(refresh_interval) and
              refresh_interval < ttl do
     GenServer.call(__MODULE__, {:register_function, fun, key, ttl, refresh_interval})
+  end
+
+  @doc ~s"""
+  Get the value associated with `key`.
+
+  Details:
+    - If the value for `key` is stored in the cache, the value is returned
+      immediately.
+    - If a recomputation of the function is in progress, the last stored value
+      is returned.
+    - If the value for `key` is not stored in the cache but a computation of
+      the function associated with this `key` is in progress, wait up to
+      `timeout` milliseconds. If the value is computed within this interval,
+      the value is returned. If the computation does not finish in this
+      interval, `{:error, :timeout}` is returned.
+    - If `key` is not associated with any function, return `{:error,
+      :not_registered}`
+  """
+  @spec get(any(), non_neg_integer(), Keyword.t()) :: result
+  def get(key, timeout \\ 30_000, _opts \\ []) when is_integer(timeout) and timeout > 0 do
+    GenServer.cast(__MODULE__, {:get, key, self()})
+
+    receive do
+      {:get_response, {:ok, value}} ->
+        {:ok, value}
+
+      {:get_response, {:error, :not_registered}} ->
+        {:error, :not_registered}
+
+      {:get_response, {:error, :not_computed}} ->
+        {:error, :not_computed}
+
+      {:get_response, {:error, :expired}} ->
+        {:error, :expired}
+
+      {:get_response, {:error, :processing_in_progress}} ->
+        wait_for_function_execution(key, timeout)
+    end
+  end
+
+  # SERVER
+
+  @impl true
+  def init(initial_state) do
+    {:ok, initial_state}
   end
 
   @impl true
@@ -175,6 +193,8 @@ defmodule Cache do
     {:noreply, state}
   end
 
+  # HELPERS
+
   defp execute_function_async(state, key, registered_function) do
     Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
       case registered_function.fun.() do
@@ -210,44 +230,6 @@ defmodule Cache do
       state
       | registered_functions: Map.put(state.registered_functions, key, registered_function)
     }
-  end
-
-  @doc ~s"""
-  Get the value associated with `key`.
-
-  Details:
-    - If the value for `key` is stored in the cache, the value is returned
-      immediately.
-    - If a recomputation of the function is in progress, the last stored value
-      is returned.
-    - If the value for `key` is not stored in the cache but a computation of
-      the function associated with this `key` is in progress, wait up to
-      `timeout` milliseconds. If the value is computed within this interval,
-      the value is returned. If the computation does not finish in this
-      interval, `{:error, :timeout}` is returned.
-    - If `key` is not associated with any function, return `{:error,
-      :not_registered}`
-  """
-  @spec get(any(), non_neg_integer(), Keyword.t()) :: result
-  def get(key, timeout \\ 30_000, _opts \\ []) when is_integer(timeout) and timeout > 0 do
-    GenServer.cast(__MODULE__, {:get, key, self()})
-
-    receive do
-      {:get_response, {:ok, value}} ->
-        {:ok, value}
-
-      {:get_response, {:error, :not_registered}} ->
-        {:error, :not_registered}
-
-      {:get_response, {:error, :not_computed}} ->
-        {:error, :not_computed}
-
-      {:get_response, {:error, :expired}} ->
-        {:error, :expired}
-
-      {:get_response, {:error, :processing_in_progress}} ->
-        wait_for_function_execution(key, timeout)
-    end
   end
 
   defp wait_for_function_execution(key, timeout) do
