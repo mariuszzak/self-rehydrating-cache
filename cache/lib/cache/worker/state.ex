@@ -7,7 +7,7 @@ defmodule Cache.Worker.State do
           ttl: non_neg_integer(),
           refresh_interval: non_neg_integer(),
           processing: boolean(),
-          task_processing_pid: pid(),
+          task_processor_pid: pid(),
           task_supervisor: Supervisor.supervisor(),
           manager_pid: pid()
         }
@@ -18,7 +18,7 @@ defmodule Cache.Worker.State do
     :ttl,
     :refresh_interval,
     :processing,
-    :task_processing_pid,
+    :task_processor_pid,
     :task_supervisor,
     :manager_pid
   ]

@@ -28,8 +28,8 @@ defmodule Cache do
   """
   use GenServer
 
-  alias Cache.Store
   alias Cache.State
+  alias Cache.Store
   alias Cache.Worker
 
   require Logger
@@ -129,8 +129,22 @@ defmodule Cache do
   # SERVER
 
   @impl true
-  def init(initial_state) do
-    {:ok, initial_state}
+  def init(state) do
+    {:ok, state, {:continue, :restore_running_workers}}
+  end
+
+  @impl true
+  def handle_continue(
+        :restore_running_workers,
+        %State{workers_supervisor: workers_supervisor} = state
+      ) do
+    with true <- workers_supervisor |> Process.whereis() |> Process.alive?() do
+      for {_, pid, _, _} <- Supervisor.which_children(state.workers_supervisor) do
+        Worker.update_manager(pid, self())
+      end
+    end
+
+    {:noreply, state}
   end
 
   @impl true
@@ -149,11 +163,9 @@ defmodule Cache do
           manager_pid: self()
         }
 
-        {:ok, pid} =
-          DynamicSupervisor.start_child(state.workers_supervisor, {Worker, worker_args})
+        {:ok, _} = DynamicSupervisor.start_child(state.workers_supervisor, {Worker, worker_args})
 
-        {:reply, :ok,
-         %{state | registered_functions: Map.put(state.registered_functions, key, pid)}}
+        {:reply, :ok, state}
     end
   end
 
@@ -202,6 +214,16 @@ defmodule Cache do
     |> Enum.each(fn subscriber ->
       send(subscriber, {:function_processing_finished, key, result})
     end)
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:register_function_worker, key, worker_pid}, state) do
+    state = %State{
+      state
+      | registered_functions: Map.put(state.registered_functions, key, worker_pid)
+    }
 
     {:noreply, state}
   end

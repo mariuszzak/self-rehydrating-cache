@@ -399,4 +399,110 @@ defmodule CacheTest do
              end) =~ "Function failed: \"oops error\""
     end
   end
+
+  describe "worker restart" do
+    setup do
+      start_supervised(Cache.Supervisor)
+      :ok
+    end
+
+    test "when a worker restarts it registers itself with a new pid in the manager" do
+      refresh_interval = 100
+
+      Cache.register_function(
+        fn ->
+          {:ok, :cached_value}
+        end,
+        :cached_key,
+        @default_ttl,
+        refresh_interval
+      )
+
+      Process.sleep(refresh_interval + 10)
+
+      [{_, pid_1, :worker, [Cache.Worker]}] =
+        DynamicSupervisor.which_children(Cache.WorkersSupervisor)
+
+      Process.exit(pid_1, :kill)
+
+      Process.monitor(pid_1)
+
+      assert_receive({:DOWN, _ref, :process, ^pid_1, _reason})
+
+      [{_, pid_2, :worker, [Cache.Worker]}] =
+        DynamicSupervisor.which_children(Cache.WorkersSupervisor)
+
+      assert pid_2 != pid_1
+
+      assert {:ok, :cached_value} == Cache.get(:cached_key)
+    end
+  end
+
+  describe "manager restart" do
+    setup do
+      start_supervised(Cache.Supervisor)
+      :ok
+    end
+
+    test "when the manager restarts it registers all running workers automatically" do
+      refresh_interval = 100
+
+      Cache.register_function(
+        fn ->
+          {:ok, :cached_value}
+        end,
+        :cached_key,
+        @default_ttl,
+        refresh_interval
+      )
+
+      Process.sleep(refresh_interval + 10)
+
+      Process.monitor(Cache)
+      manager_pid = Process.whereis(Cache)
+      Process.exit(manager_pid, :kill)
+
+      assert_receive({:DOWN, _ref, :process, {Cache, :nonode@nohost}, _reason})
+      assert manager_pid != Process.whereis(Cache)
+
+      Process.sleep(10)
+      assert {:ok, :cached_value} == Cache.get(:cached_key)
+    end
+  end
+
+  describe "store restart" do
+    setup do
+      start_supervised(Cache.Supervisor)
+      :ok
+    end
+
+    test "when the store restarts it flushes all stored values but does not affect other servers" do
+      refresh_interval = 100
+
+      Cache.register_function(
+        fn ->
+          {:ok, :cached_value}
+        end,
+        :cached_key,
+        @default_ttl,
+        refresh_interval
+      )
+
+      Process.sleep(refresh_interval + 10)
+
+      Process.monitor(Cache.Store)
+      store_pid = Process.whereis(Cache.Store)
+      Process.exit(store_pid, :kill)
+
+      assert_receive({:DOWN, _ref, :process, {Cache.Store, :nonode@nohost}, _reason})
+      assert store_pid != Process.whereis(Cache.Store)
+
+      Process.sleep(10)
+      assert {:error, :not_computed} == Cache.get(:cached_key)
+
+      Process.sleep(refresh_interval + 10)
+
+      assert {:ok, :cached_value} == Cache.get(:cached_key)
+    end
+  end
 end

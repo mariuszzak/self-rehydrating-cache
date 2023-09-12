@@ -12,7 +12,7 @@ defmodule Cache.Worker do
           ttl: non_neg_integer(),
           refresh_interval: non_neg_integer(),
           processing: boolean(),
-          task_processing_pid: pid(),
+          task_processor_pid: pid(),
           task_supervisor: Supervisor.supervisor(),
           manager_pid: pid()
         ]
@@ -23,8 +23,13 @@ defmodule Cache.Worker do
   end
 
   @spec processing_in_progress?(GenServer.server()) :: boolean()
-  def processing_in_progress?(pid) do
-    GenServer.call(pid, :processing_in_progress)
+  def processing_in_progress?(worker_pid) do
+    GenServer.call(worker_pid, :processing_in_progress)
+  end
+
+  @spec update_manager(pid(), pid()) :: :ok
+  def update_manager(worker_pid, manager_pid) do
+    GenServer.cast(worker_pid, {:update_manager, manager_pid})
   end
 
   @impl true
@@ -35,10 +40,12 @@ defmodule Cache.Worker do
       ttl: init_state.ttl,
       refresh_interval: init_state.refresh_interval,
       processing: false,
-      task_processing_pid: nil,
+      task_processor_pid: nil,
       task_supervisor: init_state.task_supervisor,
       manager_pid: init_state.manager_pid
     }
+
+    :ok = register_itself_in_manager(state)
 
     {:ok, state, {:continue, :schedule_refresh}}
   end
@@ -49,11 +56,18 @@ defmodule Cache.Worker do
   end
 
   @impl true
+  def handle_cast({:update_manager, manager_pid}, state) do
+    state = %State{state | manager_pid: manager_pid}
+    :ok = register_itself_in_manager(state)
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info(:refresh, state) do
     %State{processing: false} = state
     %Task{pid: task_pid} = execute_function_async(state)
 
-    state = %State{state | processing: true, task_processing_pid: task_pid}
+    state = %State{state | processing: true, task_processor_pid: task_pid}
 
     {:noreply, state}
   end
@@ -63,7 +77,7 @@ defmodule Cache.Worker do
   def handle_info({_ref, {:function_processing_finished, key, value}}, state) do
     send(state.manager_pid, {:function_processing_finished, key, value, state.ttl})
 
-    state = %State{state | processing: false, task_processing_pid: nil}
+    state = %State{state | processing: false, task_processor_pid: nil}
 
     {:noreply, state, {:continue, :schedule_refresh}}
   end
@@ -85,6 +99,11 @@ defmodule Cache.Worker do
   def handle_continue(:schedule_refresh, state) do
     Process.send_after(self(), :refresh, state.refresh_interval)
     {:noreply, state}
+  end
+
+  defp register_itself_in_manager(state) do
+    send(state.manager_pid, {:register_function_worker, state.key, self()})
+    :ok
   end
 
   defp execute_function_async(state) do
