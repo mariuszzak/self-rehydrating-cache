@@ -6,7 +6,7 @@ defmodule Cache.Worker do
 
   require Logger
 
-  @type arguments :: [
+  @type arguments :: %{
           fun: (-> {:ok, any()} | {:error, any()}),
           key: any(),
           ttl: non_neg_integer(),
@@ -15,7 +15,7 @@ defmodule Cache.Worker do
           task_processor_pid: pid(),
           task_supervisor: Supervisor.supervisor(),
           manager_pid: pid()
-        ]
+        }
 
   @spec start_link(arguments()) :: GenServer.on_start()
   def start_link(init_state) do
