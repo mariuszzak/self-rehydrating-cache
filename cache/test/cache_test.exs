@@ -2,8 +2,6 @@ defmodule CacheTest do
   use ExUnit.Case
   doctest Cache
 
-  alias Cache.Store
-
   @default_ttl 1_000
 
   describe "start_link/1" do
@@ -183,15 +181,16 @@ defmodule CacheTest do
 
     test "if the value for `key` is in the cache but expired" do
       Cache.register_function(
-        fn -> {:ok, :cached_value} end,
+        fn ->
+          Process.sleep(300)
+          {:ok, :cached_value}
+        end,
         :cached_key,
-        999_999,
-        999_998
+        200,
+        100
       )
 
-      Store.store(Store, :cached_key, "expired value", 1)
-
-      Process.sleep(2)
+      Process.sleep(601)
       assert {:error, :expired} = Cache.get(:cached_key)
     end
 
