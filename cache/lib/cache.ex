@@ -1,7 +1,15 @@
 defmodule Cache do
   @moduledoc """
-  FOO
+  A periodic self-rehydrating cache. The cache allows to register 0-arity functions (each under a new key)
+  that will recompute periodically and store their results in the cache for fast-access instead of being
+  called every time the values are needed.
 
+  The Cache server needs to be started together with Cache.Store and Cache.TaskSupervisor.
+  You can start everything together using `Cache.Supervisor.start_link/1`
+
+  Cache module provides the following functions:
+    - `register_function/4`: registers a function that will be computed periodically to update the cache
+    - `get/3`: gets the value associated with `key`
   """
   use GenServer
 
