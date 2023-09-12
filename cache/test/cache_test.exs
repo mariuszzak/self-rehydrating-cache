@@ -4,6 +4,8 @@ defmodule CacheTest do
 
   alias Cache.Store
 
+  @default_ttl 1_000
+
   describe "start_link/1" do
     test "starts a GenServer with default options" do
       {:ok, pid} = Cache.start_link()
@@ -27,7 +29,7 @@ defmodule CacheTest do
                Cache.register_function(
                  fn -> {:ok, :cached_value} end,
                  :cached_key,
-                 1_000,
+                 @default_ttl,
                  900
                )
     end
@@ -37,7 +39,7 @@ defmodule CacheTest do
                Cache.register_function(
                  fn -> {:ok, :cached_value} end,
                  :cached_key,
-                 1_000,
+                 @default_ttl,
                  900
                )
 
@@ -45,7 +47,7 @@ defmodule CacheTest do
                Cache.register_function(
                  fn -> {:ok, :cached_value} end,
                  :cached_key,
-                 1_000,
+                 @default_ttl,
                  900
                )
     end
@@ -66,7 +68,7 @@ defmodule CacheTest do
           {:ok, :cached_value}
         end,
         :cached_key,
-        1_000,
+        @default_ttl,
         100
       )
 
@@ -92,7 +94,7 @@ defmodule CacheTest do
           {:ok, :cached_value}
         end,
         :cached_key,
-        1_000,
+        @default_ttl,
         100
       )
 
@@ -106,19 +108,22 @@ defmodule CacheTest do
            "it returns the value" do
       test_pid = self()
 
+      execution_time = 100
+      refresh_interval = 200
+
       Cache.register_function(
         fn ->
           send(test_pid, :execution_started)
-          Process.sleep(300)
+          Process.sleep(execution_time)
           {:ok, :cached_value}
         end,
         :cached_key,
-        2_000,
-        1_000
+        @default_ttl,
+        refresh_interval
       )
 
-      assert_receive(:execution_started, 1_100)
-      assert {:ok, :cached_value} = Cache.get(:cached_key, 400)
+      assert_receive(:execution_started, refresh_interval + 10)
+      assert {:ok, :cached_value} = Cache.get(:cached_key, execution_time + 10)
       refute_received(:execution_started)
     end
 
@@ -154,14 +159,14 @@ defmodule CacheTest do
                Cache.register_function(
                  fn -> {:ok, :value_a} end,
                  :function_a,
-                 1_000,
+                 @default_ttl,
                  100
                )
 
                Cache.register_function(
                  fn -> raise "super crash" end,
                  :function_b,
-                 1_000,
+                 @default_ttl,
                  10
                )
 
@@ -175,8 +180,8 @@ defmodule CacheTest do
       assert ExUnit.CaptureLog.capture_log(fn ->
                time = System.monotonic_time(:millisecond)
 
-               refresh_interval = 500
-               function_time_execution = 1_000
+               refresh_interval = 50
+               function_time_execution = 200
 
                Cache.register_function(
                  fn ->
@@ -185,7 +190,7 @@ defmodule CacheTest do
                    {:ok, :value_a}
                  end,
                  :function_a,
-                 1_000,
+                 @default_ttl,
                  refresh_interval
                )
 
@@ -196,7 +201,7 @@ defmodule CacheTest do
                    {:ok, :value_b}
                  end,
                  :function_b,
-                 1_000,
+                 @default_ttl,
                  refresh_interval
                )
 
@@ -207,7 +212,7 @@ defmodule CacheTest do
                    {:ok, :value_c}
                  end,
                  :function_c,
-                 1_000,
+                 @default_ttl,
                  refresh_interval
                )
 
@@ -217,8 +222,8 @@ defmodule CacheTest do
                    raise "crash in function d"
                  end,
                  :function_d,
-                 1_000,
-                 100
+                 @default_ttl,
+                 10
                )
 
                # Assert that registration of the functions took less than 10ms
@@ -242,7 +247,7 @@ defmodule CacheTest do
           {:ok, System.monotonic_time(:millisecond)}
         end,
         :cached_key,
-        1_000,
+        @default_ttl,
         100
       )
 
@@ -262,7 +267,7 @@ defmodule CacheTest do
     test "function is not executed until the previous execution finishes" do
       test_pid = self()
 
-      execution_time = 500
+      execution_time = 200
       refresh_interval = 100
 
       Cache.register_function(
@@ -273,7 +278,7 @@ defmodule CacheTest do
           {:ok, :cached_value}
         end,
         :cached_key,
-        1_000,
+        @default_ttl,
         refresh_interval
       )
 
