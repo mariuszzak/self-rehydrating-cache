@@ -188,9 +188,11 @@ defmodule CacheTest do
     end
 
     test "if the value for `key` is in the cache but expired" do
+      execution_time = 300
+
       Cache.register_function(
         fn ->
-          Process.sleep(300)
+          Process.sleep(execution_time)
           {:ok, :cached_value}
         end,
         :cached_key,
@@ -198,7 +200,7 @@ defmodule CacheTest do
         100
       )
 
-      Process.sleep(610)
+      Process.sleep(execution_time * 2 + 10)
       assert {:error, :expired} = Cache.get(:cached_key)
     end
 
