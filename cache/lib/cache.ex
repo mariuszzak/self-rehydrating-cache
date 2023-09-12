@@ -126,6 +126,18 @@ defmodule Cache do
     end
   end
 
+  defp wait_for_function_execution(key, timeout) do
+    receive do
+      {:function_processing_finished, ^key, {:ok, value}} ->
+        {:ok, value}
+
+      {:function_processing_finished, ^key, :error} ->
+        {:error, :not_computed}
+    after
+      timeout -> {:error, :timeout}
+    end
+  end
+
   # SERVER
 
   @impl true
@@ -166,18 +178,6 @@ defmodule Cache do
         {:ok, _} = DynamicSupervisor.start_child(state.workers_supervisor, {Worker, worker_args})
 
         {:reply, :ok, state}
-    end
-  end
-
-  defp wait_for_function_execution(key, timeout) do
-    receive do
-      {:function_processing_finished, ^key, {:ok, value}} ->
-        {:ok, value}
-
-      {:function_processing_finished, ^key, :error} ->
-        {:error, :not_computed}
-    after
-      timeout -> {:error, :timeout}
     end
   end
 
