@@ -117,27 +117,18 @@ defmodule Cache do
 
     registered_function = %RegisteredFunction{registered_function | processing: true}
 
-    state = %State{
-      state
-      | registered_functions: Map.put(state.registered_functions, key, registered_function)
-    }
+    execute_function_async(state, key, registered_function)
 
-    Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
-      {:ok, value} = registered_function.fun.()
-      :ok = Cache.Store.store(state.store, key, value, registered_function.ttl)
-      {:function_processed, key, value}
-    end)
-
-    {:noreply, state}
+    {:noreply, update_registered_function(state, key, registered_function)}
   end
 
   # Handles success messages from the TaskSupervisor
   @impl true
-  def handle_info({_ref, {:function_processed, key, value}}, state) do
+  def handle_info({_ref, {:function_processing_finished, key, value}}, state) do
     registered_function = fetch_registered_function(state, key)
 
     for subscriber <- registered_function.subscribers do
-      send(subscriber, {:function_processed, key, value})
+      send(subscriber, {:function_processing_finished, key, value})
     end
 
     Process.send_after(self(), {:refresh, key}, registered_function.refresh_interval)
@@ -156,6 +147,14 @@ defmodule Cache do
   @impl true
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
     {:noreply, state}
+  end
+
+  defp execute_function_async(state, key, registered_function) do
+    Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
+      {:ok, value} = registered_function.fun.()
+      :ok = Cache.Store.store(state.store, key, value, registered_function.ttl)
+      {:function_processing_finished, key, value}
+    end)
   end
 
   defp fetch_registered_function(%State{registered_functions: registered_functions}, key) do
@@ -206,7 +205,14 @@ defmodule Cache do
       {:get_response, {:error, :expired}} ->
         {:error, :expired}
 
-      {:function_processed, ^key, value} ->
+      {:get_response, {:error, :processing_in_progress}} ->
+        wait_for_function_execution(key, timeout)
+    end
+  end
+
+  defp wait_for_function_execution(key, timeout) do
+    receive do
+      {:function_processing_finished, ^key, value} ->
         {:ok, value}
     after
       timeout -> {:error, :timeout}
@@ -220,7 +226,8 @@ defmodule Cache do
         case Cache.Store.get(state.store, key) do
           {:error, :not_found} ->
             if processing do
-              {:noreply, subscribe_to_registered_function(state, key, from)}
+              send(from, {:get_response, {:error, :processing_in_progress}})
+              {:noreply, subscribe_caller_to_registered_function(state, key, from)}
             else
               send(from, {:get_response, {:error, :not_computed}})
               {:noreply, state}
@@ -241,7 +248,7 @@ defmodule Cache do
     end
   end
 
-  defp subscribe_to_registered_function(state, key, subscriber) do
+  defp subscribe_caller_to_registered_function(state, key, subscriber) do
     %State{
       state
       | registered_functions:
