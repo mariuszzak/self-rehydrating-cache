@@ -4,6 +4,8 @@ defmodule Cache do
   alias Cache.Store
   alias Cache.RegisteredFunction
 
+  require Logger
+
   defmodule State do
     @moduledoc false
 
@@ -175,9 +177,15 @@ defmodule Cache do
 
   defp execute_function_async(state, key, registered_function) do
     Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
-      {:ok, value} = registered_function.fun.()
-      :ok = Store.store(state.store, key, value, registered_function.ttl)
-      {:function_processing_finished, key, value}
+      case registered_function.fun.() do
+        {:ok, value} ->
+          :ok = Store.store(state.store, key, value, registered_function.ttl)
+          {:function_processing_finished, key, {:ok, value}}
+
+        {:error, error} ->
+          Logger.error("Function failed: #{inspect(error)}")
+          {:function_processing_finished, key, :error}
+      end
     end)
   end
 
@@ -244,8 +252,11 @@ defmodule Cache do
 
   defp wait_for_function_execution(key, timeout) do
     receive do
-      {:function_processing_finished, ^key, value} ->
+      {:function_processing_finished, ^key, {:ok, value}} ->
         {:ok, value}
+
+      {:function_processing_finished, ^key, :error} ->
+        {:error, :not_computed}
     after
       timeout -> {:error, :timeout}
     end

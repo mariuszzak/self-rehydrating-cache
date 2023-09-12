@@ -365,5 +365,33 @@ defmodule CacheTest do
                assert {:ok, :cached_value} = Cache.get(:cached_key)
              end) =~ "oops it crashed"
     end
+
+    test "when the function returns error it does not affect the next executions" do
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               refresh_interval = 100
+
+               time = System.monotonic_time(:millisecond)
+
+               Cache.register_function(
+                 fn ->
+                   time_passed = System.monotonic_time(:millisecond) - time
+
+                   if time_passed in 0..200 do
+                     {:error, "oops error"}
+                   else
+                     {:ok, :cached_value}
+                   end
+                 end,
+                 :cached_key,
+                 @default_ttl,
+                 refresh_interval
+               )
+
+               Process.sleep(refresh_interval + 10)
+               assert {:error, :not_computed} = Cache.get(:cached_key)
+               Process.sleep(refresh_interval + 10)
+               assert {:ok, :cached_value} = Cache.get(:cached_key)
+             end) =~ "Function failed: \"oops error\""
+    end
   end
 end
