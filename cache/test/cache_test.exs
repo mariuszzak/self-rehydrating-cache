@@ -275,7 +275,7 @@ defmodule CacheTest do
                assert {:ok, :value_a} = Cache.get(:function_a, 10)
                assert {:ok, :value_b} = Cache.get(:function_b, 10)
                assert {:ok, :value_c} = Cache.get(:function_c, 10)
-               assert {:error, :timeout} = Cache.get(:function_d, 10)
+               assert {:error, :not_computed} = Cache.get(:function_d, 10)
              end) =~ "crash in function d"
     end
 
@@ -336,6 +336,35 @@ defmodule CacheTest do
       # another function starts once another refresh_interval passes
       refute_receive(:execution_started, refresh_interval)
       assert_receive(:execution_started, 10)
+    end
+
+    test "when the function crashes, the next execution is not affected" do
+      assert ExUnit.CaptureLog.capture_log(fn ->
+               test_pid = self()
+
+               refresh_interval = 100
+
+               time = System.monotonic_time(:millisecond)
+
+               Cache.register_function(
+                 fn ->
+                   time_passed = System.monotonic_time(:millisecond) - time
+
+                   if time_passed in 0..200 do
+                     raise "oops it crashed"
+                   end
+
+                   send(test_pid, :function_finished)
+                   {:ok, :cached_value}
+                 end,
+                 :cached_key,
+                 @default_ttl,
+                 refresh_interval
+               )
+
+               assert_receive(:function_finished, refresh_interval * 3)
+               assert {:ok, :cached_value} = Cache.get(:cached_key)
+             end) =~ "oops it crashed"
     end
   end
 end

@@ -11,11 +11,12 @@ defmodule Cache do
             ttl: non_neg_integer(),
             refresh_interval: non_neg_integer(),
             processing: boolean(),
+            task_processing_pid: pid(),
             subscribers: [pid()]
           }
 
-    @enforce_keys [:fun, :ttl, :refresh_interval, :processing, :subscribers]
-    defstruct [:fun, :ttl, :refresh_interval, :processing, :subscribers]
+    @enforce_keys [:fun, :ttl, :refresh_interval, :processing, :task_processing_pid, :subscribers]
+    defstruct [:fun, :ttl, :refresh_interval, :processing, :task_processing_pid, :subscribers]
   end
 
   defmodule State do
@@ -93,20 +94,20 @@ defmodule Cache do
         {:reply, {:error, :already_registered}, state}
 
       _ ->
-        Process.send_after(self(), {:refresh, key}, refresh_interval)
+        state = %{
+          state
+          | registered_functions:
+              Map.put(state.registered_functions, key, %RegisteredFunction{
+                fun: fun,
+                ttl: ttl,
+                refresh_interval: refresh_interval,
+                processing: false,
+                task_processing_pid: nil,
+                subscribers: []
+              })
+        }
 
-        {:reply, :ok,
-         %{
-           state
-           | registered_functions:
-               Map.put(state.registered_functions, key, %RegisteredFunction{
-                 fun: fun,
-                 ttl: ttl,
-                 refresh_interval: refresh_interval,
-                 processing: false,
-                 subscribers: []
-               })
-         }}
+        {:reply, :ok, state, {:continue, {:schedule_refresh, key, refresh_interval}}}
     end
   end
 
@@ -115,9 +116,13 @@ defmodule Cache do
     %RegisteredFunction{processing: false} =
       registered_function = Map.get(state.registered_functions, key)
 
-    registered_function = %RegisteredFunction{registered_function | processing: true}
+    %Task{pid: task_pid} = execute_function_async(state, key, registered_function)
 
-    execute_function_async(state, key, registered_function)
+    registered_function = %RegisteredFunction{
+      registered_function
+      | processing: true,
+        task_processing_pid: task_pid
+    }
 
     {:noreply, update_registered_function(state, key, registered_function)}
   end
@@ -131,7 +136,25 @@ defmodule Cache do
       send(subscriber, {:function_processing_finished, key, value})
     end
 
-    Process.send_after(self(), {:refresh, key}, registered_function.refresh_interval)
+    state =
+      update_registered_function(state, key, %RegisteredFunction{
+        registered_function
+        | processing: false,
+          subscribers: []
+      })
+
+    {:noreply, state, {:continue, {:schedule_refresh, key, registered_function.refresh_interval}}}
+  end
+
+  # Handles normal task finish from the TaskSupervisor
+  def handle_info({:DOWN, _ref, :process, _pid, :normal}, state) do
+    {:noreply, state}
+  end
+
+  # Handles error messages from the TaskSupervisor
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    {key, registered_function} = fetch_registered_function_by_pid(state, pid)
 
     state =
       update_registered_function(state, key, %RegisteredFunction{
@@ -140,12 +163,12 @@ defmodule Cache do
           subscribers: []
       })
 
-    {:noreply, state}
+    {:noreply, state, {:continue, {:schedule_refresh, key, registered_function.refresh_interval}}}
   end
 
-  # Handles error messages from the TaskSupervisor
   @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
+  def handle_continue({:schedule_refresh, key, refresh_interval}, state) do
+    Process.send_after(self(), {:refresh, key}, refresh_interval)
     {:noreply, state}
   end
 
@@ -159,6 +182,14 @@ defmodule Cache do
 
   defp fetch_registered_function(%State{registered_functions: registered_functions}, key) do
     Map.get(registered_functions, key)
+  end
+
+  defp fetch_registered_function_by_pid(%State{registered_functions: registered_functions}, pid) do
+    # this is slow but search by pid only in case of crash in TaskSupervisor
+    # so it should rarely happen
+    Enum.find_value(registered_functions, fn {key, registered_function} ->
+      registered_function.task_processing_pid == pid && {key, registered_function}
+    end)
   end
 
   defp update_registered_function(
