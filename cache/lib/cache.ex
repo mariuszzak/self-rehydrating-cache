@@ -1,7 +1,23 @@
 defmodule Cache do
   use GenServer
 
+  alias Cache.Store
   alias Cache.RegisteredFunction
+
+  defmodule State do
+    @moduledoc false
+
+    @type t :: %__MODULE__{
+            store: Agent.agent(),
+            task_supervisor: Supervisor.supervisor(),
+            registered_functions: %{
+              (key :: any) => RegisteredFunction.t()
+            }
+          }
+
+    @enforce_keys [:store, :task_supervisor, :registered_functions]
+    defstruct [:store, :task_supervisor, :registered_functions]
+  end
 
   defmodule RegisteredFunction do
     @moduledoc false
@@ -19,21 +35,6 @@ defmodule Cache do
     defstruct [:fun, :ttl, :refresh_interval, :processing, :task_processing_pid, :subscribers]
   end
 
-  defmodule State do
-    @moduledoc false
-
-    @type t :: %__MODULE__{
-            store: Agent.server(),
-            task_supervisor: Supervisor.supervisor(),
-            registered_functions: %{
-              (key :: any) => RegisteredFunction.t()
-            }
-          }
-
-    @enforce_keys [:store, :task_supervisor, :registered_functions]
-    defstruct [:store, :task_supervisor, :registered_functions]
-  end
-
   @type result ::
           {:ok, any()}
           | {:error, :timeout}
@@ -43,7 +44,7 @@ defmodule Cache do
   def start_link(opts \\ []) do
     initial_state = %State{
       registered_functions: %{},
-      store: opts[:store] || Cache.Store,
+      store: opts[:store] || Store,
       task_supervisor: opts[:task_supervisor] || Cache.TaskSupervisor
     }
 
@@ -175,7 +176,7 @@ defmodule Cache do
   defp execute_function_async(state, key, registered_function) do
     Task.Supervisor.async_nolink(Cache.TaskSupervisor, fn ->
       {:ok, value} = registered_function.fun.()
-      :ok = Cache.Store.store(state.store, key, value, registered_function.ttl)
+      :ok = Store.store(state.store, key, value, registered_function.ttl)
       {:function_processing_finished, key, value}
     end)
   end
@@ -253,23 +254,17 @@ defmodule Cache do
   @impl true
   def handle_cast({:get, key, from}, state) do
     case state.registered_functions do
-      %{^key => %RegisteredFunction{processing: processing}} ->
-        case Cache.Store.get(state.store, key) do
+      %{^key => registered_function} ->
+        case Store.get(state.store, key) do
+          {:ok, value} ->
+            send(from, {:get_response, {:ok, value}})
+            {:noreply, state}
+
           {:error, :not_found} ->
-            if processing do
-              send(from, {:get_response, {:error, :processing_in_progress}})
-              {:noreply, subscribe_caller_to_registered_function(state, key, from)}
-            else
-              send(from, {:get_response, {:error, :not_computed}})
-              {:noreply, state}
-            end
+            handle_value_not_found(registered_function, state, from, key)
 
           {:error, :expired} ->
             send(from, {:get_response, {:error, :expired}})
-            {:noreply, state}
-
-          {:ok, value} ->
-            send(from, {:get_response, {:ok, value}})
             {:noreply, state}
         end
 
@@ -277,6 +272,16 @@ defmodule Cache do
         send(from, {:get_response, {:error, :not_registered}})
         {:noreply, state}
     end
+  end
+
+  defp handle_value_not_found(%RegisteredFunction{processing: true}, state, from, key) do
+    send(from, {:get_response, {:error, :processing_in_progress}})
+    {:noreply, subscribe_caller_to_registered_function(state, key, from)}
+  end
+
+  defp handle_value_not_found(%RegisteredFunction{processing: false}, state, from, _key) do
+    send(from, {:get_response, {:error, :not_computed}})
+    {:noreply, state}
   end
 
   defp subscribe_caller_to_registered_function(state, key, subscriber) do
@@ -288,59 +293,5 @@ defmodule Cache do
             | subscribers: [subscriber | state.registered_functions[key].subscribers]
           })
     }
-  end
-end
-
-defmodule Cache.Store do
-  @moduledoc false
-
-  use Agent
-
-  @spec start_link(Keyword.t()) :: Agent.on_start()
-  def start_link(opts \\ []) do
-    initial_state = %{}
-    Agent.start_link(fn -> initial_state end, name: opts[:name] || __MODULE__)
-  end
-
-  def store(store, key, value, ttl) when is_integer(ttl) and ttl > 0 do
-    current_time = System.monotonic_time(:millisecond)
-    expiration_time = current_time + ttl
-    Agent.update(store, &Map.put(&1, key, {value, expiration_time}))
-  end
-
-  @spec get(pid(), any()) :: {:ok, any} | {:error, :expired | :not_found}
-  def get(store, key) do
-    current_time = System.monotonic_time(:millisecond)
-
-    case Agent.get(store, &Map.get(&1, key)) do
-      {value, expiration_time} when expiration_time > current_time ->
-        {:ok, value}
-
-      {_value, _expiration_time} ->
-        {:error, :expired}
-
-      nil ->
-        {:error, :not_found}
-    end
-  end
-end
-
-defmodule Cache.Supervisor do
-  use Supervisor
-
-  @spec start_link(Keyword.t()) :: GenServer.server()
-  def start_link(init_arg) do
-    Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
-  end
-
-  @impl true
-  def init(_init_arg) do
-    children = [
-      {Cache.Store, name: Cache.Store},
-      {Task.Supervisor, name: Cache.TaskSupervisor},
-      {Cache, store: Cache.Store, task_supervisor: Cache.TaskSupervisor}
-    ]
-
-    Supervisor.init(children, strategy: :one_for_one)
   end
 end
