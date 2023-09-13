@@ -133,7 +133,7 @@ defmodule CacheTest do
       refute_received(:execution_started)
     end
 
-    test "multiple get calls at the same time does not block each other" do
+    test "multiple get calls at the same time do not block each other" do
       test_pid = self()
 
       execution_time = 100
