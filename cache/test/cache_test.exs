@@ -108,6 +108,33 @@ defmodule CacheTest do
       assert {:error, :timeout} = Cache.get(:cached_key, 200)
     end
 
+    test "if the value for `key` is stored in the cache" <>
+           "and a computation of the function associated with this `key` is in progress" <>
+           "it returns the last stored value" do
+      test_pid = self()
+
+      execution_time = 300
+      refresh_interval = 100
+      tolerance = 10
+
+      Cache.register_function(
+        fn ->
+          send(test_pid, :execution_started)
+          Process.sleep(execution_time)
+          send(test_pid, :execution_finished)
+          {:ok, :cached_value}
+        end,
+        :cached_key,
+        @default_ttl,
+        refresh_interval
+      )
+
+      assert_receive(:execution_finished, execution_time + refresh_interval + tolerance)
+      assert_receive(:execution_started, refresh_interval + tolerance)
+      Process.sleep(tolerance)
+      assert {:ok, :cached_value} = Cache.get(:cached_key, tolerance)
+    end
+
     test "if the value for `key` is not stored in the cache" <>
            "and a computation of the function associated with this `key` is in progress" <>
            "and the timeout is not reached" <>
