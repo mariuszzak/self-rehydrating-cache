@@ -208,14 +208,13 @@ defmodule Cache do
   def handle_info({:function_processing_finished, key, result, ttl}, state) do
     with {:ok, value} <- result, do: :ok = Store.store(state.store, key, value, ttl)
 
-    state
-    |> Map.get(:subscribers)
-    |> Map.get(key, [])
-    |> Enum.each(fn subscriber ->
-      send(subscriber, {:function_processing_finished, key, result})
-    end)
+    {subscriber_pids, new_subscribers} = Map.pop(state.subscribers, key, [])
 
-    {:noreply, state}
+    for pid <- subscriber_pids do
+      send(pid, {:function_processing_finished, key, result})
+    end
+
+    {:noreply, Map.put(state, :subscribers, new_subscribers)}
   end
 
   @impl true
