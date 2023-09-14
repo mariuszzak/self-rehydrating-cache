@@ -106,22 +106,20 @@ defmodule Cache do
   """
   @spec get(any(), non_neg_integer(), Keyword.t()) :: result
   def get(key, timeout \\ 30_000, _opts \\ []) when is_integer(timeout) and timeout > 0 do
-    GenServer.cast(__MODULE__, {:get, key, self()})
-
-    receive do
-      {:get_response, {:ok, value}} ->
+    case GenServer.call(__MODULE__, {:get, key}) do
+      {:ok, value} ->
         {:ok, value}
 
-      {:get_response, {:error, :not_registered}} ->
+      {:error, :not_registered} ->
         {:error, :not_registered}
 
-      {:get_response, {:error, :not_computed}} ->
+      {:error, :not_computed} ->
         {:error, :not_computed}
 
-      {:get_response, {:error, :expired}} ->
+      {:error, :expired} ->
         {:error, :expired}
 
-      {:get_response, {:error, :processing_in_progress}} ->
+      {:error, :processing_in_progress} ->
         wait_for_function_execution(key, timeout)
     end
   end
@@ -182,25 +180,22 @@ defmodule Cache do
   end
 
   @impl true
-  def handle_cast({:get, key, from}, state) do
+  def handle_call({:get, key}, {from, _}, state) do
     case state.registered_functions do
       %{^key => registered_function_pid} ->
         case Store.get(state.store, key) do
           {:ok, value} ->
-            send(from, {:get_response, {:ok, value}})
-            {:noreply, state}
+            {:reply, {:ok, value}, state}
 
           {:error, :not_found} ->
             handle_value_not_found(registered_function_pid, state, from, key)
 
           {:error, :expired} ->
-            send(from, {:get_response, {:error, :expired}})
-            {:noreply, state}
+            {:reply, {:error, :expired}, state}
         end
 
       _ ->
-        send(from, {:get_response, {:error, :not_registered}})
-        {:noreply, state}
+        {:reply, {:error, :not_registered}, state}
     end
   end
 
@@ -230,12 +225,11 @@ defmodule Cache do
   defp handle_value_not_found(registered_function_pid, state, from, key) do
     case Worker.processing_in_progress?(registered_function_pid) do
       true ->
-        send(from, {:get_response, {:error, :processing_in_progress}})
-        {:noreply, subscribe_caller_to_registered_function(state, key, from)}
+        {:reply, {:error, :processing_in_progress},
+         subscribe_caller_to_registered_function(state, key, from)}
 
       false ->
-        send(from, {:get_response, {:error, :not_computed}})
-        {:noreply, state}
+        {:reply, {:error, :not_computed}, state}
     end
   end
 
